@@ -1,0 +1,1111 @@
+---
+title: 'Supplementary material for "A method of determining the time-varying degree of
+  vowel nasalization from acoustic features"'
+author: "Christopher Carignan"
+date: "09/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+This R Markdown document provides the R code necessary to recreate models and figures appearing the *Journal of the Acoustical Society of America* article "A method of determining the time-varying degree of vowel nasalization from acoustic features" (*under revision*).
+
+
+
+## Preparing the data
+
+The data 
+
+Let's begin by loading the required R packages:
+
+```{r, echo=F}
+setwd('/home/chris/Documents/research/JASA_acoustic_nasality')
+```
+
+
+```{r packages, message=F}
+require(ggplot2)
+require(brms)
+require(parallel)
+require(tidybayes)
+require(dplyr)
+require(extraDistr)
+require(HDInterval)
+require(mgcv)
+require(itsadug)
+require(ggpubr)
+```
+
+Now we'll pre-allocate some variables and data frames:
+
+```{r preallocate}
+# speaker names
+speakers <- c('S01','S02','S03','S04','S05','S06')
+
+# random seed for replicability
+seed <- 1
+
+# pre-allocate some stuff
+naf.corrs <- c()
+naf_red.corrs <- c()
+a1p0.corrs <- c()
+a1p0_comp.corrs <- c()
+a1p1.corrs <- c()
+a1p1_comp.corrs <- c()
+
+# pre-allocate some more stuff
+naf.diffs <- c()
+naf_red.diffs <- c()
+a1p0.diffs <- c()
+a1p0_comp.diffs <- c()
+a1p1.diffs <- c()
+a1p1_comp.diffs <- c()
+
+# more pre-allocation stuff
+all.dat <- c()
+oral.num <- c()
+nasal.num <- c()
+
+```
+
+## Main loop: data loading, extraction, and measurement by speaker and vowel
+
+Now we've got the heart of the code, which loops through all of the speaker data to perform various measurements and add the results to the pre-allocated data frames:
+
+```{r loop}
+# loop through the speaker list
+for (speaker in speakers) {
+  # pre-allocate some stuff
+  naf.corrs[[speaker]] <- c()
+  naf_red.corrs[[speaker]] <- c()
+  a1p0.corrs[[speaker]] <- c()
+  a1p0_comp.corrs[[speaker]] <- c()
+  a1p1.corrs[[speaker]] <- c()
+  a1p1_comp.corrs[[speaker]] <- c()
+  
+  # load the speaker's data set
+  nas.dat <- read.csv(file=paste0('data/',speaker,'_data.csv'))
+  
+  # create the H1-H2 metric
+  nas.dat$h1h2 <- nas.dat$amp_h1 - nas.dat$amp_h2
+  
+  
+  # create the training data set
+  train_ind <- c()
+  for (vowel in unique(nas.dat$vowel)) {
+    # set the random seed to make sure that the training and testing data are split in the same way every time
+    set.seed(seed)
+    
+    # get the speaker's data for this vowel
+    vowel.dat <- nas.dat[nas.dat$vowel==vowel,]
+    
+    # scale the nasalance data for the vowel
+    nas.dat$nasalance_z[nas.dat$vowel==vowel] <- scale(vowel.dat$nasalance)
+    
+    # randomly select 75% of the tokens to be used for training
+    train_tok <- sample(unique(vowel.dat$token), size = round(0.75*length(unique(vowel.dat$token))))
+    
+    # get the row numbers corresponding to all of the data for these training tokens
+    train_ind <- c(train_ind, as.numeric(row.names(vowel.dat[vowel.dat$token %in% train_tok,])))
+  }
+  
+  # column names corresponding to different sets of acoustic features
+  nas.features <- c('freq_f1','freq_f2','freq_f3',
+                    'amp_f1','amp_f2','amp_f3',
+                    'width_f1','width_f2','width_f3',
+                    'amp_p0','a1p0','a1p0_compensated','p0prominence',
+                    'amp_p1','a1p1','a1p1_compensated',
+                    'a3p0','h1h2','murmur','cog')
+  mfc.features <- c(paste0('mfcc0',1:9),
+                    paste0('mfcc',10:13))
+  all.features <- c(nas.features, mfc.features)
+  
+  
+  # PCA of all acoustic features (for full NAF method)
+  pca.full <- stats::prcomp(nas.dat[,all.features], scale=T, center=T)
+  
+  # PCA of only MFCCs (for reduced NAF method)
+  pca.red <- stats::prcomp(nas.dat[,mfc.features], scale=T, center=T)
+  
+  
+  
+  # split tokens into low and high degrees of nasalance
+  lo <- quantile(nas.dat$nasalance_z[train_ind], c(0.25))
+  hi <- quantile(nas.dat$nasalance_z[train_ind], c(0.75))
+  
+  
+  # 'oral' tokens: lower quartile of nasalance
+  oral.dat  <- nas.dat[train_ind,]
+  oral.dat  <- oral.dat[oral.dat$nasalance_z<lo,]
+  oral.dat$nasality <- 'oral'
+  oral.num <- c(oral.num,nrow(oral.dat))
+  
+  # 'nasal' tokens: upper quartile of nasalance
+  nasal.dat <- nas.dat[train_ind,]
+  nasal.dat <- nasal.dat[nasal.dat$nasalance_z>hi,]
+  nasal.dat$nasality <- 'nasal'
+  nasal.num <- c(nasal.num,nrow(nasal.dat))
+  
+  
+  # combine oral and nasal tokens
+  train.dat <- rbind(oral.dat,nasal.dat)
+  train.dat <- train.dat[,c('nasality',all.features)]
+  train.dat$nasality <- as.factor(train.dat$nasality)
+  
+  # get the indexes of the training items
+  train_ind2 <- as.numeric(row.names(train.dat))
+  
+  
+  # # # # # # # # # #
+  # full NAF method #
+  # # # # # # # # # #
+  
+  # create a data frame with the PC scores for the full acoustic feature set
+  pca.dat <- cbind.data.frame(train.dat$nasality, pca.full$x[train_ind2,])
+  colnames(pca.dat)[1] <- 'nasality'
+  pca.dat$nasality <- as.character(pca.dat$nasality)
+  
+  # convert 'oral' and 'nasal' to numeric 0 and 1
+  pca.dat$nasality[pca.dat$nasality=='oral'] <- 0
+  pca.dat$nasality[pca.dat$nasality=='nasal'] <- 1
+  pca.dat$nasality <- as.numeric(pca.dat$nasality)
+  
+  # build the linear regression model with PC scores as predictors
+  lm.mod <- lm(nasality ~ ., data=pca.dat)
+  
+  # generate NAF values for the testing data
+  NAF.full <- predict(lm.mod, newdata=as.data.frame(pca.full$x[-train_ind,]), type='response')
+  
+  
+  # # # # # # # # # # # #
+  # reduced NAF method  #
+  # # # # # # # # # # # #
+  
+  # create a data frame with the PC scores for the reduced acoustic feature set (MFCCs only)
+  pca.dat <- cbind.data.frame(train.dat$nasality, pca.red$x[train_ind2,])
+  colnames(pca.dat)[1] <- 'nasality'
+  pca.dat$nasality <- as.character(pca.dat$nasality)
+  
+  # convert 'oral' and 'nasal' to numeric 0 and 1
+  pca.dat$nasality[pca.dat$nasality=='oral'] <- 0
+  pca.dat$nasality[pca.dat$nasality=='nasal'] <- 1
+  pca.dat$nasality <- as.numeric(pca.dat$nasality)
+  
+  # build the linear regression model with PC scores as predictors
+  lm.mod <- lm(nasality ~ ., data=pca.dat)
+  
+  # generate NAF values for the testing data
+  NAF.red <- predict(lm.mod, newdata=as.data.frame(pca.red$x[-train_ind,]), type='response')
+  
+  
+  # get the testing data (i.e. all of the tokens that weren't used in training)
+  # and add the NAF values from the full and reduced methods
+  test.dat <- cbind(nas.dat[-train_ind,], NAF.full, NAF.red)
+  
+  # scale the values of all metrics to be tested
+  test.dat$nasalance_z      <- scale(test.dat$nasalance_z)
+  test.dat$a1p0             <- scale(-test.dat$a1p0)
+  test.dat$a1p0_compensated <- scale(-test.dat$a1p0_compensated)
+  test.dat$a1p1             <- scale(-test.dat$a1p1)
+  test.dat$a1p1_compensated <- scale(-test.dat$a1p1_compensated)
+  test.dat$NAF              <- scale(test.dat$NAF.full)
+  test.dat$NAF.red          <- scale(test.dat$NAF.red)
+  
+  # loop through all of the individual tokens (500 ms windows) in the speaker's data set
+  for (token in unique(test.dat$token)) {
+    # get the data for this token
+    token.dat <- test.dat[test.dat$token==token,]
+    
+    # smooth all measurements for the token
+    token.dat$NAF               <- stats::smooth(token.dat$NAF)
+    token.dat$NAF.red           <- stats::smooth(token.dat$NAF.red)
+    token.dat$a1p0              <- stats::smooth(token.dat$a1p0)
+    token.dat$a1p0_compensated  <- stats::smooth(token.dat$a1p0_compensated)
+    token.dat$a1p1              <- stats::smooth(token.dat$a1p1)
+    token.dat$a1p1_compensated  <- stats::smooth(token.dat$a1p1_compensated)
+    
+    # replace the data in the original table with the smoothed token data
+    test.dat$NAF[test.dat$token==token]               <- token.dat$NAF
+    test.dat$NAF.red[test.dat$token==token]           <- token.dat$NAF.red
+    test.dat$a1p0[test.dat$token==token]              <- token.dat$a1p0
+    test.dat$a1p0_compensated[test.dat$token==token]  <- token.dat$a1p0_compensated
+    test.dat$a1p1[test.dat$token==token]              <- token.dat$a1p1
+    test.dat$a1p1_compensated[test.dat$token==token]  <- token.dat$a1p1_compensated
+    
+    
+    # since the 500 window (100 samples) is centered on the point of maximum velocity in the nasalance signal,
+    # we will take sample 50 as the point of peak nasalance velocity (i.e. the nasalance 'onset')
+    nas.onset <- 50
+    
+    # find the temporal lag (ms) between the velocity peak in the nasalance signal and the velocity peak in each test metric
+    naf.diff        <- 5*(which.max(diff(token.dat$NAF)) - nas.onset)
+    naf_red.diff    <- 5*(which.max(diff(token.dat$NAF.red)) - nas.onset)
+    a1p0.diff       <- 5*(which.max(diff(token.dat$a1p0)) - nas.onset)
+    a1p0_comp.diff  <- 5*(which.max(diff(token.dat$a1p0_compensated)) - nas.onset)
+    a1p1.diff       <- 5*(which.max(diff(token.dat$a1p1)) - nas.onset)
+    a1p1_comp.diff  <- 5*(which.max(diff(token.dat$a1p_compensated)) - nas.onset)
+    
+    # add the temporal lag/difference data to the respective data frames
+    vowel <- unique(token.dat$vowel)
+    
+    naf.diffs <- rbind.data.frame(naf.diffs,
+                                  c(speaker, vowel, naf.diff, 'NAF'))
+    naf_red.diffs <- rbind.data.frame(naf_red.diffs,
+                                      c(speaker, vowel, naf_red.diff, 'NAF red.'))
+    a1p0.diffs <- rbind.data.frame(a1p0.diffs,
+                                   c(speaker, vowel, a1p0.diff, 'A1-P0'))
+    a1p0_comp.diffs <- rbind.data.frame(a1p0_comp.diffs,
+                                        c(speaker, vowel, a1p0_comp.diff, 'A1-P0 comp.'))
+    a1p1.diffs <- rbind.data.frame(a1p1.diffs,
+                                   c(speaker, vowel, a1p1.diff, 'A1-P1'))
+    a1p1_comp.diffs <- rbind.data.frame(a1p1_comp.diffs,
+                                        c(speaker, vowel, a1p0_comp.diff, 'A1-P1 comp.'))
+  }
+  
+  # rename columns of the temporal lag data frames
+  colnames(naf.diffs)       <- c('speaker','vowel','ons.diff','method')
+  colnames(naf_red.diffs)   <- c('speaker','vowel','ons.diff','method')
+  colnames(a1p0.diffs)      <- c('speaker','vowel','ons.diff','method')
+  colnames(a1p0_comp.diffs) <- c('speaker','vowel','ons.diff','method')
+  colnames(a1p1.diffs)      <- c('speaker','vowel','ons.diff','method')
+  colnames(a1p1_comp.diffs) <- c('speaker','vowel','ons.diff','method')
+  
+  
+  # for each vowel, get the correlations between each metric and the nasalance signal
+  for (vowel in unique(test.dat$vowel)) {
+    
+    # get the correlation between nasalance and the full NAF
+    naf.corrs[[speaker]][vowel] <- as.numeric(
+      cor.test(
+        test.dat$nasalance_z[test.dat$vowel==vowel], test.dat$NAF[test.dat$vowel==vowel]
+      )[4] # index 4 is the correlation coefficient
+    )
+    
+    # get the correlation between nasalance and the reduced NAF
+    naf_red.corrs[[speaker]][vowel] <- as.numeric(
+      cor.test(
+        test.dat$nasalance_z[test.dat$vowel==vowel], test.dat$NAF.red[test.dat$vowel==vowel]
+      )[4] # index 4 is the correlation coefficient
+    )
+    
+    # get the correlation between nasalance and A1-P0
+    a1p0.corrs[[speaker]][vowel] <- as.numeric(
+      cor.test(
+        test.dat$nasalance_z[test.dat$vowel==vowel], test.dat$a1p0[test.dat$vowel==vowel]
+      )[4] # index 4 is the correlation coefficient
+    )
+    
+    # get the correlation between nasalance and formant-compensated A1-P0
+    a1p0_comp.corrs[[speaker]][vowel] <- as.numeric(
+      cor.test(
+        test.dat$nasalance_z[test.dat$vowel==vowel], test.dat$a1p0_compensated[test.dat$vowel==vowel]
+      )[4] # index 4 is the correlation coefficient
+    )
+    
+    # get the correlation between nasalance and A1-P1
+    a1p1.corrs[[speaker]][vowel] <- as.numeric(
+      cor.test(
+        test.dat$nasalance_z[test.dat$vowel==vowel], test.dat$a1p1[test.dat$vowel==vowel]
+      )[4] # index 4 is the correlation coefficient
+    )
+    
+    # get the correlation between nasalance and formant-compensated A1-P1
+    a1p1_comp.corrs[[speaker]][vowel] <- as.numeric(
+      cor.test(
+        test.dat$nasalance_z[test.dat$vowel==vowel], test.dat$a1p1_compensated[test.dat$vowel==vowel]
+      )[4] # index 4 is the correlation coefficient
+    )
+  }
+  
+  # add the speaker's testing data to a full data set for later GAMM analysis
+  all.dat <- rbind.data.frame(all.dat, cbind(speaker, test.dat))
+}
+
+# combine the temporal lag data into a single data frame
+diff.dat <- rbind.data.frame(
+  naf.diffs, naf_red.diffs, a1p0.diffs, a1p0_comp.diffs, a1p1.diffs, a1p1_comp.diffs
+)
+# convert classes of variables as appropriate
+diff.dat$speaker  <- as.factor(diff.dat$speaker)
+diff.dat$vowel    <- as.factor(diff.dat$vowel)
+diff.dat$ons.diff <- as.numeric(diff.dat$ons.diff)
+diff.dat$method   <- factor(diff.dat$method, levels=c('NAF','NAF red.','A1-P0','A1-P0 comp.','A1-P1','A1-P1 comp.'))
+
+```
+
+## Correlation with nasalance
+
+We can now look at the global averages and SDs of the correlations with nasalance to get an idea of how well each metric performs:
+```{r}
+# full NAF
+mean(unlist(naf.corrs))
+sd(unlist(naf.corrs))
+
+# reduced NAF
+mean(unlist(naf_red.corrs))
+sd(unlist(naf_red.corrs))
+
+# A1-P0
+mean(unlist(a1p0.corrs))
+sd(unlist(a1p0.corrs))
+
+# formant-compensated A1-P0
+mean(unlist(a1p0_comp.corrs))
+sd(unlist(a1p0_comp.corrs))
+
+# A1-P1
+mean(unlist(a1p1.corrs))
+sd(unlist(a1p1.corrs))
+
+# formant-compensated A1-P1
+mean(unlist(a1p1_comp.corrs))
+sd(unlist(a1p1_comp.corrs))
+```
+
+Let's ombine all of the correlation data into one table...
+
+```{r}
+# NB: substr(X,1,3) extracts the speaker names, while substr(X,5,6) extracts the vowel names
+acc.dat <- rbind.data.frame(
+  cbind(substr(names(unlist(naf.corrs)),1,3),
+        substr(names(unlist(naf.corrs)),5,6),
+        unlist(naf.corrs),'NAF'),
+  cbind(substr(names(unlist(naf_red.corrs)),1,3),
+        substr(names(unlist(naf_red.corrs)),5,6),
+        unlist(naf.corrs),'NAF red.'),
+  cbind(substr(names(unlist(a1p0.corrs)),1,3),
+        substr(names(unlist(naf.corrs)),5,6),
+        unlist(a1p0.corrs),'A1-P0'),
+  cbind(substr(names(unlist(a1p0_comp.corrs)),1,3),
+        substr(names(unlist(naf.corrs)),5,6),
+        unlist(a1p0_comp.corrs),'A1-P0 comp.'),
+  cbind(substr(names(unlist(a1p1.corrs)),1,3),
+        substr(names(unlist(naf.corrs)),5,6),
+        unlist(a1p1.corrs),'A1-P1'),
+  cbind(substr(names(unlist(a1p1_comp.corrs)),1,3),
+        substr(names(unlist(naf.corrs)),5,6),
+        unlist(a1p1_comp.corrs),'A1-P1 comp.')
+)
+colnames(acc.dat) <- c('speaker','vowel','accuracy','method')
+
+# convert classes of variables as appropriate
+acc.dat$speaker   <- as.factor(acc.dat$speaker)
+acc.dat$vowel     <- as.factor(acc.dat$vowel)
+acc.dat$accuracy  <- as.numeric(acc.dat$accuracy)
+acc.dat$method    <- factor(acc.dat$method, levels=c('NAF','NAF red.','A1-P0','A1-P0 comp.','A1-P1','A1-P1 comp.'))
+acc.dat$R2        <- acc.dat$accuracy^2 # R^2
+```
+
+...and extract the correlation coefficents by vowel and store them in separate data frames:
+```{r}
+
+vowels <- c('i','ih','e','eh','ae','a','ah','oh','o','uh','u')
+vowel.acc.naf <- c()
+vowel.acc.naf_red <- c()
+vowel.acc.a1p0 <- c()
+vowel.acc.a1p0_comp <- c()
+vowel.acc.a1p1 <- c()
+vowel.acc.a1p1_comp <- c()
+for (vowel in vowels) {
+  for (speaker in speakers) {
+    if (vowel %in% names(naf.corrs[[speaker]])) {
+      vowel.acc.naf[[vowel]][speaker]       <- naf.corrs[[speaker]][[vowel]]
+      vowel.acc.naf_red[[vowel]][speaker]   <- naf_red.corrs[[speaker]][[vowel]]
+      vowel.acc.a1p0[[vowel]][speaker]      <- a1p0.corrs[[speaker]][[vowel]]
+      vowel.acc.a1p0_comp[[vowel]][speaker] <- a1p0_comp.corrs[[speaker]][[vowel]]
+      vowel.acc.a1p1[[vowel]][speaker]      <- a1p1.corrs[[speaker]][[vowel]]
+      vowel.acc.a1p1_comp[[vowel]][speaker] <- a1p1_comp.corrs[[speaker]][[vowel]]
+    }
+  }
+}
+```
+
+We can now look at the separate average and SD of correlation coefficients by vowel and speaker (example below for one vowel (/i/) and one speaker (S01):)
+```{r}
+# average and SD for vowel /i/ (averaged across speakers)
+# these values appear in Table I of the paper
+mean(vowel.acc.naf$i)
+sd(vowel.acc.naf$i)
+
+# average and SD for speaker S01 (averaged across vowels)
+# these values appear in Table II of the paper
+mean(naf.corrs$S01)
+sd(naf.corrs$S01)
+```
+
+
+## Bayesian regression models (BRMs)
+
+The BRMs can take a long time to run if you're building them for the first time, so let's enable parallel processing. If you have the model .Rds file from Github, the *brm* function will simply load that instead of building a new model:
+
+```{r}
+core.num <- parallel::detectCores()
+options(mc.cores=core.num)
+set.seed(seed)
+```
+
+### BRM of R^2^ values
+
+The inverse cumulative density function can be used to report the HDI range for the sigma value we'll use:
+
+```{r}
+HDInterval::inverseCDF(c(0.025,0.975), phcauchy, sigma=0.01)
+# This corresponds to a 95% HDI at sigma 0.01 = [0, 0.25] R^2
+```
+
+We'll now generate the following weakly informative priors for the R^2^ model:
+
+* NAF R^2^ is between 0 and 1
+* The difference between the other methods and NAF are between -1 and +1
+* The model SD and the random intercept SD HDI = [0, 0.25]
+
+
+```{r R2priors}
+priors <- c(
+  prior(normal(0.5,0.25), class=Intercept),
+  prior(normal(0,0.5), class=b, coef=methodNAFred.),
+  prior(normal(0,0.5), class=b, coef=methodA1MP0),
+  prior(normal(0,0.5), class=b, coef=methodA1MP0comp.),
+  prior(normal(0,0.5), class=b, coef=methodA1MP1),
+  prior(normal(0,0.5), class=b, coef=methodA1MP1comp.),
+  prior(cauchy(0,0.01), class=sd),
+  prior(cauchy(0,0.01), class=sigma),
+  prior(lkj(2), class=cor)
+)
+```
+
+
+Now we can build the model with the above priors and random effects for speaker and vowel:
+```{r R2brm}
+acc.mod <- brms::brm(R2 ~ method + 
+                       (1 + method | speaker) +
+                       (1 + method | vowel),
+                     data = acc.dat,
+                     family = gaussian(),
+                     seed = seed,
+                     iter = 2000,
+                     warmup = 1000,
+                     prior = priors,
+                     chains = 4,
+                     cores = core.num,
+                     control = list(adapt_delta = 0.9999,
+                                    max_treedepth = 15),
+                     file = 'models/acc_brms'
+)
+```
+
+If desired, we can get a summary of the model:
+
+```{r}
+summary(acc.mod)
+```
+
+Lets get the posterior values from the BRM for plotting and generating summary statistics:
+
+```{r}
+posts <- brms::posterior_samples(acc.mod, pars='b_') %>% 
+  dplyr::mutate('NAF (full)' = b_Intercept,
+                'NAF (red.)' = b_Intercept + b_methodNAFred.,
+                'A1-P0' = b_Intercept + b_methodA1MP0,
+                'A1-P0 comp.' = b_Intercept + b_methodA1MP0comp.,
+                'A1-P1' = b_Intercept + b_methodA1MP1,
+                'A1-P1 comp.' = b_Intercept + b_methodA1MP1comp.
+  ) %>% 
+  dplyr::select('NAF (full)', 'NAF (red.)', 'A1-P0', 'A1-P0 comp.', 'A1-P1', 'A1-P1 comp.') %>% 
+  tidyr::gather(method, R2)
+```
+
+### Figure 4
+
+Now that we have the posteriors, we can create Figure 4 from the paper:
+
+```{r Fig4}
+posts %>% 
+  ggplot(aes(x = R2, y = method)) +
+  geom_vline(xintercept=0,lty=2) +
+  geom_vline(xintercept=1,lty=2) +
+  geom_halfeyeh(fill='lightblue') + 
+  coord_cartesian(xlim=c(0,1)) +
+  ylab('') + xlab(expression(R^2~'of correlation with nasalance')) +
+  scale_x_continuous(breaks=seq(0,1,0.1),minor_breaks=seq(0,1,0.1)) +
+  scale_y_discrete(limits=c('A1-P1 comp.','A1-P1','A1-P0 comp.','A1-P0','NAF (red.)','NAF (full)'), labels=c('A1-P1\ncomp.','A1-P1','A1-P0\ncomp.','A1-P0','NAF     \n(reduced)','NAF (full)')) +
+  theme_bw() + theme(plot.margin = unit(c(0.2,0.2,0.2,-0.2), 'cm'))
+```
+
+### BRM of R^2^ values: summary statistics
+
+In order to generate the summary statistics that are reported in the paper, we first need to get the fixed effects from the BRM:
+```{r}
+acc_fixed <- fixef(acc.mod)
+```
+
+We'll get the lower and lower bounds of the 95% credible interval for the full NAF values (the model intercept):
+```{r}
+# Lower
+acc_fixed[1,3]
+# Upper
+acc_fixed[1,4]
+```
+
+Now we can find the differences for the other methods, in comparison to the model intercept (i.e. the full NAF method)...
+```{r}
+acc_diffs <- brms::posterior_samples(acc.mod, pars = 'b_') %>%
+  dplyr::mutate(
+    NAF = b_Intercept,
+    NAFred = b_Intercept + b_methodNAFred.,
+    A1P0 = b_Intercept + b_methodA1MP0,
+    A1P0comp = b_Intercept + b_methodA1MP0comp.,
+    A1P1 = b_Intercept + b_methodA1MP1,
+    A1P1comp = b_Intercept + b_methodA1MP1comp.,
+    NAFred.diff = NAFred - NAF,
+    A1P0.diff = A1P0 - NAF,
+    A1P0comp.diff = A1P0comp - NAF,
+    A1P1.diff = A1P1 - NAF,
+    A1P1comp.diff = A1P1comp - NAF
+  )
+```
+
+...and generate the 95% CIs that are reported in the article:
+```{r}
+quantile(acc_diffs$NAFred.diff, probs = c(0.025, 0.975))
+quantile(acc_diffs$A1P0.diff, probs = c(0.025, 0.975))
+quantile(acc_diffs$A1P0comp.diff, probs = c(0.025, 0.975))
+quantile(acc_diffs$A1P1.diff, probs = c(0.025, 0.975))
+quantile(acc_diffs$A1P1comp.diff, probs = c(0.025, 0.975))
+```
+
+### BRM of temporal lag measure
+
+The inverse cumulative density function can be used to report the HDI range for the sigma value we'll use:
+
+```{r}
+HDInterval::inverseCDF(c(0.025,0.975), phcauchy, sigma=2)
+# This corresponds to a 95% HDI at sigma 2 = [0, 51] ms
+```
+
+We'll now generate the following weakly informative priors for the R^2^ model:
+
+* NAF time lag is between -200 ms and 200 ms
+* The difference between the other methods and NAF are between -100 ms and +100 ms
+* The model SD and the random intercept SD HDI = [0, 0.51]
+
+
+```{r lagpriors}
+priors <- c(
+  prior(normal(0,100), class=Intercept),
+  prior(normal(0,50), class=b, coef=methodNAFred.),
+  prior(normal(0,50), class=b, coef=methodA1MP0),
+  prior(normal(0,50), class=b, coef=methodA1MP0comp.),
+  prior(normal(0,50), class=b, coef=methodA1MP1),
+  prior(normal(0,50), class=b, coef=methodA1MP1comp.),
+  prior(cauchy(0,2), class=sd),
+  prior(cauchy(0,2), class=sigma),
+  prior(lkj(2), class=cor)
+)
+```
+
+Now we can build the model with the above priors and random effects for speaker and vowel:
+
+
+```{r lagbrm}
+diff.mod <- brm(ons.diff ~ method + 
+                  (1 + method | speaker) +
+                  (1 + method | vowel),
+                family = gaussian(),
+                data = diff.dat,
+                seed = seed,
+                iter = 2000,
+                warmup = 1000,
+                prior = priors,
+                chains = 4,
+                cores = core.num,
+                control = list(adapt_delta = 0.9999,
+                               max_treedepth = 15),
+                file = 'models/diff_brms'
+)
+```
+
+If desired, we can get a summary of the model:
+
+```{r}
+summary(diff.mod)
+```
+
+Lets get the posterior values from the BRM for plotting and generating summary statistics:
+
+```{r}
+posts <- brms::posterior_samples(diff.mod, pars='b_') %>% 
+  dplyr::mutate('NAF (full)' = b_Intercept,
+                'NAF (red.)' = b_Intercept + b_methodNAFred.,
+                'A1-P0' = b_Intercept + b_methodA1MP0,
+                'A1-P0 comp.' = b_Intercept + b_methodA1MP0comp.,
+                'A1-P1' = b_Intercept + b_methodA1MP1,
+                'A1-P1 comp.' = b_Intercept + b_methodA1MP1comp.) %>% 
+  dplyr::select('NAF (full)', 'NAF (red.)', 'A1-P0', 'A1-P0 comp.', 'A1-P1', 'A1-P1 comp.') %>% 
+  tidyr::gather(method, ons.diff)
+```
+
+
+### Figure 5
+
+Now that we have the posteriors, we can create Figure 5 from the paper:
+
+```{r Fig5}
+posts %>% 
+  ggplot(aes(x = ons.diff, y = method)) +
+  geom_vline(xintercept=0,lty=2) +
+  geom_halfeyeh(fill='lightblue') + 
+  coord_cartesian(xlim=c(-40,60)) +
+  ylab('') + xlab('Time (ms) relative to maximum velocity of nasalance signal') +
+  scale_x_continuous(breaks=seq(-250,250,10),minor_breaks=seq(-250,250,10)) +
+  scale_y_discrete(limits=c('A1-P1 comp.','A1-P1','A1-P0 comp.','A1-P0','NAF (red.)','NAF (full)'), labels=c('A1-P1\ncomp.','A1-P1','A1-P0\ncomp.','A1-P0','NAF     \n(reduced)','NAF (full)')) +
+  theme_bw() + theme(plot.margin = unit(c(0.2,0.2,0.2,-0.2), 'cm'))
+```
+
+
+### BRM of temporal lag measure: summary statistics
+
+In order to generate the summary statistics that are reported in the paper, we first need to get the fixed effects from the BRM:
+```{r}
+diff_fixed <- fixef(diff.mod)
+```
+
+We'll get the lower and lower bounds of the 95% credible interval for the full NAF values (the model intercept):
+```{r}
+# Lower
+diff_fixed[1,3]
+# Upper
+diff_fixed[1,4]
+```
+
+Now we can find the differences for the other methods, in comparison to the model intercept (i.e. the full NAF method)...
+
+```{r}
+diff_diffs <- brms::posterior_samples(diff.mod, pars = 'b_') %>%
+  dplyr::mutate(
+    NAF = b_Intercept,
+    NAFred = b_Intercept + b_methodNAFred.,
+    A1P0 = b_Intercept + b_methodA1MP0,
+    A1P0comp = b_Intercept + b_methodA1MP0comp.,
+    A1P1 = b_Intercept + b_methodA1MP1,
+    A1P1comp = b_Intercept + b_methodA1MP1comp.,
+    NAFred.diff = NAFred - NAF,
+    A1P0.diff = A1P0 - NAF,
+    A1P0comp.diff = A1P0comp - NAF,
+    A1P1.diff = A1P1 - NAF,
+    A1P1comp.diff = A1P1comp - NAF
+  )
+```
+
+
+...and generate the 95% CIs that are reported in the article:
+
+```{r}
+quantile(diff_diffs$NAFred.diff, probs = c(0.025, 0.975))
+quantile(diff_diffs$A1P0.diff, probs = c(0.025, 0.975))
+quantile(diff_diffs$A1P0comp.diff, probs = c(0.025, 0.975))
+quantile(diff_diffs$A1P1.diff, probs = c(0.025, 0.975))
+quantile(diff_diffs$A1P1comp.diff, probs = c(0.025, 0.975))
+```
+
+
+## Generalized additive mixed models (GAMMs)
+
+In order to build the GAMM, we first have to prepare the data. As part of this preparation, we convert timepoints to ms, with each 500 ms token centered on 0:
+
+```{r}
+gam.dat <- rbind.data.frame(
+  cbind(all.dat$speaker, all.dat$vowel, 5*(all.dat$point_vwlpct-50), scale(all.dat$nasalance_z), 'nasalance'),
+  cbind(all.dat$speaker, all.dat$vowel, 5*(all.dat$point_vwlpct-50), scale(all.dat$NAF), 'NAF (full)'),
+  cbind(all.dat$speaker, all.dat$vowel, 5*(all.dat$point_vwlpct-50), scale(all.dat$NAF.red), 'NAF (red.)'),
+  cbind(all.dat$speaker, all.dat$vowel, 5*(all.dat$point_vwlpct-50), scale(all.dat$a1p0_compensated), 'A1-P0 (comp.)')
+)
+colnames(gam.dat) <- c('speaker','vowel','timepoint','value','method')
+
+# convert classes of variables as appropriate
+gam.dat$value     <- as.numeric(gam.dat$value)
+gam.dat$timepoint <- as.numeric(gam.dat$timepoint)
+gam.dat$speaker   <- as.factor(gam.dat$speaker)
+gam.dat$vowel     <- as.factor(gam.dat$vowel)
+gam.dat$method    <- factor(gam.dat$method, levels=c('nasalance','NAF (full)','NAF (red.)','A1-P0 (comp.)'))
+```
+
+Because these are time-series data, correlation between samples is expected, resulting in auto-correlation of the model residuals, resulting in a violation of the model assumption of independent errors. The *bam* function can deal with this nicely, but we first need to create a separate colum to identify the beginning of each token:
+
+```{r}
+gam.dat$AR.start <- gam.dat$timepoint==-250
+```
+
+We'll first have to build a base model without the auto-correlation reduced, so that we can determine how much correlation is present. Random smooths are included by speaker and vowel:
+
+```{r warning=F}
+m1 <- mgcv::bam(value ~ method + s(timepoint, by=method) +
+                  s(timepoint, speaker, by=method, bs='fs', m=1) +
+                  s(timepoint, vowel, by=method, bs='fs', m=1), 
+                data=gam.dat)
+```
+
+With this base model, we can now estimate the *rho* value to use in reducing auto-correlation in the final model. Plotting the results will reveal that there is a lot of correlation to get rid of!
+
+```{r}
+macf <- itsadug::acf_resid(m1)
+```
+
+We now build the final model, with the auto-correlation reduced, by using the auto-correlation function (ACF) value at lag = 1:
+
+```{r warning=F}
+m2 <- mgcv::bam(value ~ method + s(timepoint, by=method) +
+                  s(timepoint, speaker, by=method, bs='fs', m=1) +
+                  s(timepoint, vowel, by=method, bs='fs', m=1), 
+                rho=macf[2], AR.start=gam.dat$AR.start, data=gam.dat)
+```
+
+Plotting the ACF of the new model reveals that the correlation has been reduced quite nicely!
+
+```{r}
+itsadug::acf_resid(m2)
+```
+
+The gam.check function reveals that the number of basis functions used is appropriate for these data:
+
+```{r}
+mgcv::gam.check(m2)
+```
+
+
+And a summary of the model tells us how strongly each smooth is in contributing to the model (i.e. in explaining the total variance):
+
+```{r}
+summary(m2)
+```
+
+
+
+### Figure 6
+
+We now generate a plot object in order to extract the model fits for each method and put them into a data frame:
+
+```{r}
+pl_data <- plot(m2, pages=1)
+
+nasalance_pl  <- pl_data[[1]][c('x', 'fit', 'se')]
+naf.full_pl   <- pl_data[[2]][c('x', 'fit', 'se')]
+naf.red_pl    <- pl_data[[3]][c('x', 'fit', 'se')]
+a1p0_pl       <- pl_data[[4]][c('x', 'fit', 'se')]
+
+# create a data frame with the model fit data
+gamm.plt <- rbind.data.frame(
+  cbind(nasalance_pl$x, nasalance_pl$fit, nasalance_pl$se, 'nasalance'),
+  cbind(a1p0_pl$x, a1p0_pl$fit, a1p0_pl$se, 'A1-P0 (comp.)'),
+  cbind(naf.full_pl$x, naf.full_pl$fit, naf.full_pl$se, 'NAF (full)'),
+  cbind(naf.red_pl$x, naf.red_pl$fit, naf.red_pl$se, 'NAF (red.)')
+)
+colnames(gamm.plt) <- c('time','fit','se','method')
+
+# convert classes of variables as appropriate
+gamm.plt$time   <- as.numeric(gamm.plt$time)
+gamm.plt$fit    <- as.numeric(gamm.plt$fit)
+gamm.plt$se     <- as.numeric(gamm.plt$se)
+gamm.plt$method <- factor(gamm.plt$method, levels=c('nasalance','NAF (full)','NAF (red.)','A1-P0 (comp.)'))
+
+```
+
+Now that we have the model fits for the different methods, we can create Figure 6 from the paper:
+
+```{r Fig6}
+ggplot(gamm.plt, aes(x=time, colour=method, group=method)) +
+  geom_ribbon(aes(ymin=fit-se, ymax=fit+se, fill=method, linetype=method), alpha=0.3) +
+  scale_y_continuous(name='GAMM fit',breaks=seq(-1,1,0.5),minor_breaks=seq(-1,1,0.5)) +
+  scale_x_continuous(name='Time (ms) relative to maximum velocity of nasalance signal',
+                     breaks=seq(-250,250,50),minor_breaks=seq(-250,250,50)) +
+  scale_color_discrete(limits=c('nasalance','NAF (full)','NAF (red.)','A1-P0 (comp.)'),
+                       labels=c('nasalance','NAF (full)','NAF (red.)','A1-P0\n(comp.)')) +
+  scale_fill_discrete(limits=c('nasalance','NAF (full)','NAF (red.)','A1-P0 (comp.)'),
+                      labels=c('nasalance','NAF (full)','NAF (red.)','A1-P0\n(comp.)')) +
+  scale_linetype_manual(limits=c('nasalance','NAF (full)','NAF (red.)','A1-P0 (comp.)'),
+                        labels=c('nasalance','NAF (full)','NAF (red.)','A1-P0\n(comp.)'),
+                        values=c(1,5,3,4)) +
+  theme_bw()
+```
+
+### Investigating random smooths
+
+For the sake of space, the following plots are not included in the JASA article, but they may nonetheless be of interest to some readers. The random smooths from the GAMM can be plotted in order to view the within-category variation present in the data for each smooth.
+
+First, let's plot the inter-speaker variation (the by-speaker random smooth):
+```{r speakersmooth}
+par(mfrow=c(1,4), mar=c(3.5,2.1,1.5,0.5), mgp=c(2,1,0))
+
+plot(m2,select=5,cex.lab=1.1,ylab='')
+title('Nasalance', line=0.5)
+
+plot(m2,select=6,cex.lab=1.1,ylab='')
+title('Full NAF', line=0.5)
+
+plot(m2,select=7,cex.lab=1.1,ylab='')
+title('Reduced NAF', line=0.5)
+
+plot(m2,select=8,cex.lab=1.1,ylab='')
+title('Compensated A1-P0', line=0.5)
+```
+
+We can see that there is a small amount of variation across speakers for all four metrics, with the most variation observed for formant-compensated A1-P0. As mentioned in the article, the size of this variation can also be inferred from the size of the *F*-statistic in the model summary (shown above): a small amount of variation for nasalance (*F*=1.32) and the full NAF (*F*=1.69), a bit more for the reduced NAF (*F*=2.04), and yet more for formant-compensated A1-P0 (*F*=2.88).
+
+
+And now let's plot the inter-vowel variation (the by-vowel random smooth):
+```{r vowelsmooth}
+par(mfrow=c(1,4), mar=c(3.5,2.1,1.5,0.5), mgp=c(2,1,0))
+
+plot(m2,select=9,cex.lab=1.1,ylab='')
+title('Nasalance', line=0.5)
+
+plot(m2,select=10,cex.lab=1.1,ylab='')
+title('Full NAF', line=0.5)
+
+plot(m2,select=11,cex.lab=1.1,ylab='')
+title('Reduced NAF', line=0.5)
+
+plot(m2,select=12,cex.lab=1.1,ylab='')
+title('Compensated A1-P0', line=0.5)
+```
+
+We can see that there is considerably more inter-vowel variation across the different methods than there was inter-speaker variation. There is essentially no variation across vowels for nasalance (*F*=0.06), a small amount of variation for the full NAF (*F*=1.02), a bit more for the reduced NAF (*F*=1.46), but quite substantial amount of variation across vowels for formant-compensated A1-P0 (*F*=5.35).
+
+
+
+## Example implementation of NAF
+
+This final portion of the R markdown file is concerned with Section IV.B of the article, which is an example of the practical implementation of the NAF method in the design of a study. Here we use a separate set of data that was collected specifically for this example. 
+
+Let's first get the data and do a bit of preparation:
+
+```{r}
+# get the data for the example speaker, S00
+speaker <- 'S00'
+nas.dat <- read.csv(file=paste0('data/',speaker,'_data.csv'))
+
+nas.dat$vowel <- as.factor(nas.dat$vowel)
+nas.dat$type  <- as.factor(nas.dat$type)
+
+# create the H1-H2 metric
+nas.dat$h1h2 <- nas.dat$amp_h1 - nas.dat$amp_h2
+
+# generate new row names for random sampling purposes
+row.names(nas.dat) <- 1:nrow(nas.dat)
+
+# scale the nasalance values for each vowel
+for (vowel in unique(nas.dat$vowel)) {
+  nas.dat$nasalance[nas.dat$vowel==vowel] <- scale(nas.dat$nasalance[nas.dat$vowel==vowel], center=T, scale=T)
+}
+
+# global rescaling of nasalance values
+nas.dat$nasalance <- scale(nas.dat$nasalance, center=T, scale=T)
+```
+
+
+Now that the data has been prepared, let's separate it into training and testing sets, and get the indexes of the samples associated with the training items:
+
+```{r}
+training  <- nas.dat[nas.dat$type %in% c('oral','nasal'),]
+testing   <- nas.dat[nas.dat$type %in% c('nd','nt'),]
+
+train_ind <- as.numeric(row.names(training))
+```
+
+And now we do the PCA regression:
+
+```{r}
+# PCA of all acoustic features (for full NAF method)
+pca.full <- prcomp(nas.dat[,all.features], scale=T, center=T)
+
+# create a data frame with the PC scores for the full acoustic feature set
+pca.dat <- cbind.data.frame(training$type, pca.full$x[train_ind,])
+colnames(pca.dat)[1] <- 'nasality'
+pca.dat$nasality <- as.character(pca.dat$nasality)
+
+# convert 'oral' and 'nasal' to numeric 0 and 1
+pca.dat$nasality[pca.dat$nasality=='oral'] <- 0
+pca.dat$nasality[pca.dat$nasality=='nasal'] <- 1
+pca.dat$nasality <- as.numeric(pca.dat$nasality)
+
+# build the linear regression model with PC scores as predictors
+lm.mod <- lm(nasality ~ ., data=pca.dat)
+```
+
+
+With this linear regression model, we can create NAF values for the testing items:
+
+```{r}
+testing$NAF <- predict(lm.mod, newdata=as.data.frame(pca.full$x[-train_ind,]), type='response')
+```
+
+And then scale and smooth the data from the three metrics before examining the results:
+
+```{r}
+# scale the NAF values and formant-compensated A1-P0 values
+testing$NAF <- scale(testing$NAF, center=T, scale=T)
+testing$a1p0_compensated <- scale(-testing$a1p0_compensated, center=T, scale=T)
+
+# smooth the NAF and A1-P0 measurements for all tokens
+for (token in unique(testing$token)) {
+  token.dat <- testing[testing$token==token,]
+  
+  testing$NAF[testing$token==token]               <- smooth(token.dat$NAF)
+  testing$a1p0_compensated[testing$token==token]  <- smooth(token.dat$a1p0_compensated)
+}
+```
+
+A bit of data wrangling needs be performed before building the GAMM:
+
+```{r}
+# separate the data for the three metrics
+dat1 <- cbind(testing[,c('type','vowel','timepoint','nasalance')],'nasalance')
+dat2 <- cbind(testing[,c('type','vowel','timepoint','NAF')],'NAF')
+dat3 <- cbind(testing[,c('type','vowel','timepoint','a1p0_compensated')],'A1P0')
+
+# rename columns
+colnames(dat1) <- c('type','vowel','timepoint','value','method')
+colnames(dat2) <- c('type','vowel','timepoint','value','method')
+colnames(dat3) <- c('type','vowel','timepoint','value','method')
+
+# combine into one data frame
+gam.dat <- rbind.data.frame(dat1,dat2,dat3)
+
+# convert classes of variables as appropriate
+gam.dat$value       <- as.numeric(gam.dat$value)
+gam.dat$timepoint   <- as.numeric(gam.dat$timepoint)
+gam.dat$vowel       <- as.factor(gam.dat$vowel)
+gam.dat$method      <- factor(gam.dat$method, levels=c('nasalance','NAF','A1P0'))
+gam.dat$type2       <- paste0(gam.dat$method,'-',gam.dat$type)
+gam.dat$type2       <- factor(gam.dat$type2, levels=c('nasalance-nd','nasalance-nt',
+                                                      'NAF-nd','NAF-nt',
+                                                      'A1P0-nd','A1P0-nt'))
+```
+
+
+The process in building the GAMM is the same as before, so we won't go through it step by step again:
+
+```{r, warning=F}
+# create AR.start variable to reduce correlation starting at the beginning of each token
+gam.dat$AR.start <- gam.dat$timepoint==1
+
+# build base model without auto-correlation reduced
+# random smooths for vowel
+m1 <- mgcv::bam(value ~ type2 + s(timepoint, by=type2) +
+                  s(timepoint, vowel, by=type2, bs='fs', m=1), 
+                data=gam.dat)
+
+# estimate the rho value to use in reducing auto-correlation in the model
+macf <- itsadug::acf_resid(m1, plot=F)
+
+# build the new model, with auto-correlation reduced
+m2 <- mgcv::bam(value ~ type2 + s(timepoint, by=type2) +
+                  s(timepoint, vowel, by=type2, bs='fs', m=1), 
+                rho=macf[2], AR.start=gam.dat$AR.start, data=gam.dat)
+
+# the gam.check function reveals that the number of basis functions used is appropriate for these data
+gam.check(m2)
+
+
+# generate a plot object in order to extract the model fits for each method
+pl_data <- plot(m2, pages=1)
+
+nasalance.nd_pl <- pl_data[[1]][c('x', 'fit', 'se')]
+nasalance.nt_pl <- pl_data[[2]][c('x', 'fit', 'se')]
+naf.nd_pl       <- pl_data[[3]][c('x', 'fit', 'se')]
+naf.nt_pl       <- pl_data[[4]][c('x', 'fit', 'se')]
+a1p0.nd_pl      <- pl_data[[5]][c('x', 'fit', 'se')]
+a1p0.nt_pl      <- pl_data[[6]][c('x', 'fit', 'se')]
+
+
+# create a data frame with the model fit of the nasalance data
+gamm.plt <- rbind.data.frame(
+  cbind(nasalance.nd_pl$x,nasalance.nd_pl$fit,nasalance.nd_pl$se,'nasalance-nd'),
+  cbind(nasalance.nt_pl$x,nasalance.nt_pl$fit,nasalance.nt_pl$se,'nasalance-nt')
+)
+colnames(gamm.plt) <- c('time','fit','se','method')
+gamm.plt$time   <- as.numeric(gamm.plt$time)
+gamm.plt$fit    <- as.numeric(gamm.plt$fit)
+gamm.plt$se     <- as.numeric(gamm.plt$se)
+gamm.plt$method <- factor(gamm.plt$method, levels=c('nasalance-nd','nasalance-nt'))
+```
+
+### Figure 7
+
+```{r}
+# create a plot object for the nasalance GAMM fit
+p1 <- ggplot(gamm.plt, aes(x=time, colour=method, group=method)) +
+  geom_ribbon(aes(ymin=fit-se, ymax=fit+se, fill=method, linetype=method), alpha=0.3) +
+  scale_fill_discrete(name = 'Context', labels = c('/nd/','/nt/')) +
+  scale_colour_discrete(name = 'Context', labels = c('/nd/','/nt/')) +
+  scale_linetype_discrete(name = 'Context', labels = c('/nd/','/nt/')) +
+  ggtitle('Nasalance') +
+  scale_y_continuous(name='GAMM fit',breaks=seq(-2,2,0.5),minor_breaks=seq(-2,2,0.5),limits=c(-1.6,1.1)) +
+  scale_x_continuous(name='Percentage of vowel interval',
+                     labels=seq(0,100,20),
+                     breaks=seq(0,10,2),minor_breaks=seq(0,10,2)) +
+  theme_bw()
+
+
+# create a data frame with the model fit of the full NAF data
+gamm.plt <- rbind.data.frame(
+  cbind(naf.nd_pl$x,naf.nd_pl$fit,naf.nd_pl$se,'NAF-nd'),
+  cbind(naf.nt_pl$x,naf.nt_pl$fit,naf.nt_pl$se,'NAF-nt')
+)
+colnames(gamm.plt) <- c('time','fit','se','method')
+gamm.plt$time   <- as.numeric(gamm.plt$time)
+gamm.plt$fit    <- as.numeric(gamm.plt$fit)
+gamm.plt$se     <- as.numeric(gamm.plt$se)
+gamm.plt$method <- factor(gamm.plt$method, levels=c('NAF-nd','NAF-nt'))
+
+# create a plot object for the NAF GAMM fit
+p2 <- ggplot(gamm.plt, aes(x=time, colour=method, group=method)) +
+  geom_ribbon(aes(ymin=fit-se, ymax=fit+se, fill=method, linetype=method), alpha=0.3) +
+  scale_fill_discrete(name = 'Context', labels = c('/nd/','/nt/')) +
+  scale_colour_discrete(name = 'Context', labels = c('/nd/','/nt/')) +
+  scale_linetype_discrete(name = 'Context', labels = c('/nd/','/nt/')) +
+  ggtitle('Full NAF method') +
+  scale_y_continuous(name='GAMM fit',breaks=seq(-2,2,0.5),minor_breaks=seq(-2,2,0.5),limits=c(-1.6,1.1)) +
+  scale_x_continuous(name='Percentage of vowel interval',
+                     labels=seq(0,100,20),
+                     breaks=seq(0,10,2),minor_breaks=seq(0,10,2)) +
+  theme_bw()
+
+
+# create a data frame with the model fit of the formant-compensated A1-P0 data
+gamm.plt <- rbind.data.frame(
+  cbind(a1p0.nd_pl$x,a1p0.nd_pl$fit,a1p0.nd_pl$se,'A1P0-nd'),
+  cbind(a1p0.nt_pl$x,a1p0.nt_pl$fit,a1p0.nt_pl$se,'A1P0-nt')
+)
+colnames(gamm.plt) <- c('time','fit','se','method')
+gamm.plt$time   <- as.numeric(gamm.plt$time)
+gamm.plt$fit    <- as.numeric(gamm.plt$fit)
+gamm.plt$se     <- as.numeric(gamm.plt$se)
+gamm.plt$method <- factor(gamm.plt$method, levels=c('A1P0-nd','A1P0-nt'))
+
+# create a plot object for the A1-P0 GAMM fit
+p3 <- ggplot(gamm.plt, aes(x=time, colour=method, group=method)) +
+  geom_ribbon(aes(ymin=fit-se, ymax=fit+se, fill=method, linetype=method), alpha=0.3) +
+  scale_fill_discrete(name = 'Context', labels = c('/nd/','/nt/')) +
+  scale_colour_discrete(name = 'Context', labels = c('/nd/','/nt/')) +
+  scale_linetype_discrete(name = 'Context', labels = c('/nd/','/nt/')) +
+  ggtitle('Formant-compensated A1-P0') +
+  scale_y_continuous(name='GAMM fit',breaks=seq(-2,2,0.5),minor_breaks=seq(-2,2,0.5),limits=c(-1.6,1.1)) +
+  scale_x_continuous(name='Percentage of vowel interval',
+                     labels=seq(0,100,20),
+                     breaks=seq(0,10,2),minor_breaks=seq(0,10,2)) +
+  theme_bw()
+```
+
+And finally, we now combine the plot objects to create Figure 7 from the article:
+
+```{r Fig7}
+# Figure 7
+par(mfrow=c(1,3), mar=c(3.5,2.1,1.5,0.5), mgp=c(2,1,0))
+ggarrange(p1, p2, p3, ncol=3, nrow=1, common.legend = TRUE, legend='right')
+```
+
