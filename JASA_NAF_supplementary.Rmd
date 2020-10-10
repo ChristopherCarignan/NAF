@@ -963,14 +963,14 @@ A bit of data wrangling needs be performed before building the GAMM:
 
 ```{r}
 # separate the data for the three metrics
-dat1 <- cbind(testing[,c('type','vowel','timepoint','nasalance')],'nasalance')
-dat2 <- cbind(testing[,c('type','vowel','timepoint','NAF')],'NAF')
-dat3 <- cbind(testing[,c('type','vowel','timepoint','a1p0_compensated')],'A1P0')
+dat1 <- cbind(testing[,c('type','vowel','repetition','timepoint','nasalance')],'nasalance')
+dat2 <- cbind(testing[,c('type','vowel','repetition','timepoint','NAF')],'NAF')
+dat3 <- cbind(testing[,c('type','vowel','repetition','timepoint','a1p0_compensated')],'A1P0')
 
 # rename columns
-colnames(dat1) <- c('type','vowel','timepoint','value','method')
-colnames(dat2) <- c('type','vowel','timepoint','value','method')
-colnames(dat3) <- c('type','vowel','timepoint','value','method')
+colnames(dat1) <- c('type','vowel','repetition','timepoint','value','method')
+colnames(dat2) <- c('type','vowel','repetition','timepoint','value','method')
+colnames(dat3) <- c('type','vowel','repetition','timepoint','value','method')
 
 # combine into one data frame
 gam.dat <- rbind.data.frame(dat1,dat2,dat3)
@@ -979,6 +979,7 @@ gam.dat <- rbind.data.frame(dat1,dat2,dat3)
 gam.dat$value       <- as.numeric(gam.dat$value)
 gam.dat$timepoint   <- as.numeric(gam.dat$timepoint)
 gam.dat$vowel       <- as.factor(gam.dat$vowel)
+gam.dat$repetition  <- as.ordered(gam.dat$repetition)
 gam.dat$method      <- factor(gam.dat$method, levels=c('nasalance','NAF','A1P0'))
 gam.dat$type2       <- paste0(gam.dat$method,'-',gam.dat$type)
 gam.dat$type2       <- factor(gam.dat$type2, levels=c('nasalance-nd','nasalance-nt',
@@ -994,9 +995,10 @@ The process in building the GAMM is the same as before, so we won't go through i
 gam.dat$AR.start <- gam.dat$timepoint==1
 
 # build base model without auto-correlation reduced
-# random smooths for vowel
+# random smooths for vowel and item repetition
 m1 <- mgcv::bam(value ~ type2 + s(timepoint, by=type2) +
-                  s(timepoint, vowel, by=type2, bs='fs', m=1), 
+                  s(timepoint, vowel, by=type2, bs='fs', m=1) +
+                  s(timepoint, repetition, by=type2, bs='fs', m=1), 
                 data=gam.dat)
 
 # estimate the rho value to use in reducing auto-correlation in the model
@@ -1004,7 +1006,8 @@ macf <- itsadug::acf_resid(m1, plot=F)
 
 # build the new model, with auto-correlation reduced
 m2 <- mgcv::bam(value ~ type2 + s(timepoint, by=type2) +
-                  s(timepoint, vowel, by=type2, bs='fs', m=1), 
+                  s(timepoint, vowel, by=type2, bs='fs', m=1) +
+                  s(timepoint, repetition, by=type2, bs='fs', m=1), 
                 rho=macf[2], AR.start=gam.dat$AR.start, data=gam.dat)
 
 # the gam.check function reveals that the number of basis functions used is appropriate for these data
