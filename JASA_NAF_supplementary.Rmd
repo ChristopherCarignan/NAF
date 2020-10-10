@@ -22,10 +22,6 @@ The data
 
 Let's begin by loading the required R packages:
 
-```{r, echo=F}
-setwd('/home/chris/Documents/research/JASA_acoustic_nasality')
-```
-
 
 ```{r packages, message=F}
 require(ggplot2)
