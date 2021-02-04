@@ -1,8 +1,7 @@
 ---
-title: 'Supplementary material for "A method of determining the time-varying degree of
-  vowel nasalization from acoustic features"'
+title: 'Supplementary material for "A practical method of estimating the time-varying degree of vowel nasalization from acoustic features"'
 author: "Christopher Carignan"
-date: "09/10/2020"
+date: "4 February, 2021"
 output: html_document
 ---
 
@@ -12,7 +11,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Introduction
 
-This R Markdown document provides the R code necessary to recreate models and figures appearing the *Journal of the Acoustical Society of America* article "A method of determining the time-varying degree of vowel nasalization from acoustic features" (*under revision*).
+This R Markdown document provides the R code necessary to recreate models and figures appearing in: Carignan, C. (2021). "A practical method of estimating the time-varying degree of vowel nasalization from acoustic features." *Journal of the Acoustical Society of America, 149*(2), 911--922, DOI: 10.1121/10.0002925
 
 
 
